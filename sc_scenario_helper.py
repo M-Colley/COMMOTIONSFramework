@@ -11,6 +11,8 @@ EPSILON = np.finfo(float).eps
 
 SMALL_NEG_SPEED = -0.01 # m/s - used as threshold for functions that don't accept negative speeds - but to allow minor speed imprecisions at stopping
 ACC_CTRL_REGAIN_SPD_TIME = 10 # s - assumed time needed for acceleration-controlling agent to regain free speed (regardless of starting speed)
+CROSSING_COS_SNAP_THRESHOLD = 1e-9 # |cos(crossing angle)| below this means perpendicular paths (see get_crossing_cos_sin())
+PARALLEL_PATHS_SIN_THRESHOLD = 1e-6 # |sin(crossing angle)| below this means (anti)parallel paths, not supported
 
 class CtrlType(Enum):
     SPEED = 0
@@ -77,10 +79,14 @@ AccessOrderValueDetails = collections.namedtuple('AccessOrderValueDetails',
                                                   'inh_access_value'])
 
 # a class for storing static information about an agent
+# - cos_crossing_angle is the cosine of the angle between the two agents' 
+#   headings (dot product of heading vectors); zero (the default) for 
+#   perpendicular paths
 SCAgentImage = collections.namedtuple('SCAgentImage', 
                                       ['ctrl_type', 'params', 'v_free', 
                                        'g_free', 'V_free', 'coll_dist',
-                                       'eff_width'])
+                                       'eff_width', 'cos_crossing_angle'],
+                                      defaults = (0.0,))
 
 
 def get_agent_free_speed(k):
@@ -229,10 +235,62 @@ def get_time_to_dist_with_acc(state, target_dist, consider_acc=True):
     
     
 
-def get_agent_coll_dist(ego_length, oth_width):
-    # Return the longitudinal position of the (centre point of) the agent, when 
-    # it is just at the edge of the contested space.
-    return oth_width / 2 + ego_length / 2
+def get_crossing_cos_sin(yaw_angle_1, yaw_angle_2):
+    """ Return a tuple (c, s) with c = cos(yaw_angle_1 - yaw_angle_2), i.e., the
+        dot product of the two agents' heading vectors, and 
+        s = |sin(yaw_angle_1 - yaw_angle_2)|.
+        
+        If abs(c) < CROSSING_COS_SNAP_THRESHOLD, the paths are considered 
+        perpendicular, and exactly (0.0, 1.0) is returned (for example, 
+        perpendicular yaw angles obtained from atan2() typically give 
+        c ~ 6e-17), so that all the crossing-angle-aware calculations reduce 
+        exactly to the original perpendicular expressions.
+        
+        Raises a ValueError if the paths are (anti)parallel, i.e., if 
+        s < PARALLEL_PATHS_SIN_THRESHOLD.
+    """
+    delta_yaw = yaw_angle_1 - yaw_angle_2
+    c = math.cos(delta_yaw)
+    s = abs(math.sin(delta_yaw))
+    if abs(c) < CROSSING_COS_SNAP_THRESHOLD:
+        return (0.0, 1.0)
+    if s < PARALLEL_PATHS_SIN_THRESHOLD:
+        raise ValueError('The agents\' paths are (anti)parallel (crossing angle'
+                         f' {math.degrees(math.acos(max(-1, min(1, c)))):.4g}'
+                         ' deg); only crossing paths are supported.')
+    return (c, s)
+
+
+def get_agent_coll_dist(ego_length, oth_width, ego_width = None, 
+                        crossing_angle = math.pi / 2):
+    """ Return the longitudinal position of the (centre point of) the ego agent,
+        when it is just at the edge of the contested space, i.e., the 
+        half-length along the ego agent's path of the interval in which the 
+        ego agent's rectangle overlaps the other agent's path (a strip of 
+        width oth_width).
+        
+        crossing_angle is the angle (rad) between the two agents' headings, 
+        default pi/2 (perpendicular paths). For a crossing angle theta 
+        (0 < theta < pi), projecting the ego agent's rectangle onto the normal
+        of the other agent's path gives
+            
+            ego_length/2 + (oth_width/2) / sin(theta) 
+                + (ego_width/2) * |cot(theta)|
+        
+        which requires ego_width for non-perpendicular paths. For 
+        perpendicular paths (|cos(theta)| < CROSSING_COS_SNAP_THRESHOLD) the 
+        original expression oth_width / 2 + ego_length / 2 is returned exactly,
+        and ego_width is not needed. Raises a ValueError for (anti)parallel 
+        paths.
+    """
+    (c, s) = get_crossing_cos_sin(crossing_angle, 0)
+    if c == 0:
+        # perpendicular paths
+        return oth_width / 2 + ego_length / 2
+    if ego_width is None:
+        raise ValueError('ego_width is needed for non-perpendicular crossing'
+                         ' angles.')
+    return ego_length / 2 + (oth_width / 2) / s + (ego_width / 2) * abs(c) / s
 
 
 def get_app_entry_exit_time_arrays(cp_dists, speeds, coll_dist):
@@ -353,7 +411,9 @@ def get_access_order_values(
             action_jerk : float
                 Ego agent jerk during the action/prediction interval.
             oth_image : SCAgentImage
-                Static information about the other agent.
+                Static information about the other agent. The field
+                oth_image.cos_crossing_angle (zero for perpendicular paths) is 
+                used in the looming calculations.
             oth_curr_state : commotions.KinematicState 
                 Current state of the other agent. 
             oth_first_acc : float
@@ -506,7 +566,8 @@ def get_access_order_values(
             # get anticipated looming
             thetaDots = get_agent_optical_exps(cp_dists, speeds, 
                                                oth_cp_dists, oth_speeds, 
-                                               oth_image.eff_width)
+                                               oth_image.eff_width,
+                                               oth_image.cos_crossing_angle)
             # only count anticipated looming when there is an apparent collision course
             thetaDots[np.logical_not(app_coll_courses)] = 0
             # get the looming value contributions
@@ -928,38 +989,97 @@ def get_sc_agent_collision_margins(ag1_ds, ag2_ds, ag1_coll_dist, ag2_coll_dist)
     return (collision_margins, collision_idxs)
 
 
-def get_agent_optical_size(ego_state, oth_state, oth_image):
+def get_agent_optical_size(ego_state, oth_state, oth_image, 
+                           cos_crossing_angle = None):
     """
     Return the optical size, in radians, of the agent described by
     oth_state and oth_image, as seen by an agent with state ego_state.
+    
+    cos_crossing_angle is the cosine of the angle between the two agents'
+    headings (if None, taken from oth_image.cos_crossing_angle, which 
+    defaults to zero for perpendicular paths), used for the distance between 
+    the agents, see get_inter_agent_dists().
 
     """
-    dist = math.sqrt(ego_state.signed_CP_dist ** 2 
-                     + oth_state.signed_CP_dist ** 2)
+    if cos_crossing_angle is None:
+        cos_crossing_angle = getattr(oth_image, 'cos_crossing_angle', 0.0)
+    if cos_crossing_angle == 0:
+        dist = math.sqrt(ego_state.signed_CP_dist ** 2 
+                         + oth_state.signed_CP_dist ** 2)
+    else:
+        dist = float(get_inter_agent_dists(ego_state.signed_CP_dist, 
+                                           oth_state.signed_CP_dist,
+                                           cos_crossing_angle))
     theta = 2 * math.atan(oth_image.eff_width / (2 * dist))
     return theta
 
 
+def get_inter_agent_dists(ego_cp_dists, oth_cp_dists, cos_crossing_angle = 0.0):
+    """
+    Return the distance(s) between the centre points of two agents at signed 
+    distances ego_cp_dists and oth_cp_dists (numpy arrays or scalars) before 
+    the conflict point, on straight paths with an angle between the agents' 
+    headings with cosine cos_crossing_angle (default zero, perpendicular 
+    paths). With p_i = p_CP - d_i * h_i and c = h_1 . h_2:
+        
+        |p_1 - p_2|^2 = d_1^2 + d_2^2 - 2 * c * d_1 * d_2
+        
+    """
+    if cos_crossing_angle == 0:
+        return np.sqrt(ego_cp_dists ** 2 + oth_cp_dists ** 2)
+    else:
+        sq_dists = (ego_cp_dists ** 2 + oth_cp_dists ** 2 
+                    - 2 * cos_crossing_angle * ego_cp_dists * oth_cp_dists)
+        # protect against tiny negative values from rounding
+        return np.sqrt(np.maximum(sq_dists, 0))
+
+
 def get_agent_optical_exps(ego_cp_dists, ego_speeds,
-                           oth_cp_dists, oth_speeds, oth_eff_width):
+                           oth_cp_dists, oth_speeds, oth_eff_width, 
+                           cos_crossing_angle = 0.0):
     """
     Return the visual looming, in rad/s, of the agent described by numpy arrays
     (or scalars) oth_cp_dists, oth_speeds oth_eff_widths, as seen by an agent 
     with states described by ego_cp_dists and ego_speeds.
+    
+    cos_crossing_angle is the cosine of the angle between the two agents'
+    headings (default zero, i.e., perpendicular paths). With inter-agent
+    distance D (see get_inter_agent_dists()), the rate of change of D is given
+    by
+    
+        D * Ddot = d_1 * d_1dot + d_2 * d_2dot 
+                    - c * (d_1dot * d_2 + d_1 * d_2dot),
+        
+    where d_idot = -v_i, and the looming is 
+    thetaDot = -W * Ddot / (D^2 + W^2 / 4), where W is oth_eff_width. For
+    c = 0 this reduces exactly to the original perpendicular expression.
 
     """
     # see handwritten notes dated 2021-10-12
-    dists = np.sqrt(ego_cp_dists ** 2 + oth_cp_dists ** 2)
-    thetaDots = -((oth_eff_width / dists)
-                  * (ego_cp_dists * (-ego_speeds) 
-                     + oth_cp_dists * (-oth_speeds))
-                  / (dists ** 2 + oth_eff_width ** 2 / 4))
+    if cos_crossing_angle == 0:
+        dists = np.sqrt(ego_cp_dists ** 2 + oth_cp_dists ** 2)
+        thetaDots = -((oth_eff_width / dists)
+                      * (ego_cp_dists * (-ego_speeds) 
+                         + oth_cp_dists * (-oth_speeds))
+                      / (dists ** 2 + oth_eff_width ** 2 / 4))
+    else:
+        c = cos_crossing_angle
+        dists = get_inter_agent_dists(ego_cp_dists, oth_cp_dists, c)
+        dists_x_dist_rates = (ego_cp_dists * (-ego_speeds) 
+                              + oth_cp_dists * (-oth_speeds)
+                              - c * ((-ego_speeds) * oth_cp_dists 
+                                     + ego_cp_dists * (-oth_speeds)))
+        thetaDots = -((oth_eff_width / dists) * dists_x_dist_rates
+                      / (dists ** 2 + oth_eff_width ** 2 / 4))
     return thetaDots
 
 
-def get_agent_optical_exp(ego_state, oth_state, oth_image):
+def get_agent_optical_exp(ego_state, oth_state, oth_image, 
+                          cos_crossing_angle = None):
     """ Return the visual looming, in rad/s, of the agent described by
         oth_state and oth_image, as seen by an agent with state ego_state.
+        cos_crossing_angle as for get_agent_optical_size() and 
+        get_agent_optical_exps().
     """
     # dist = math.sqrt(ego_state.signed_CP_dist ** 2 
     #                  + oth_state.signed_CP_dist ** 2)
@@ -968,9 +1088,11 @@ def get_agent_optical_exp(ego_state, oth_state, oth_image):
     #                 + oth_state.signed_CP_dist * (-oth_state.long_speed))
     #              / (dist ** 2 + oth_image.eff_width ** 2 / 4))
     # return thetaDot
+    if cos_crossing_angle is None:
+        cos_crossing_angle = getattr(oth_image, 'cos_crossing_angle', 0.0)
     return get_agent_optical_exps(ego_state.signed_CP_dist, ego_state.long_speed, 
                                   oth_state.signed_CP_dist, oth_state.long_speed, 
-                                  oth_image.eff_width)
+                                  oth_image.eff_width, cos_crossing_angle)
         
 
 # "unit tests"

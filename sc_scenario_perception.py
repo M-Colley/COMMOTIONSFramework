@@ -74,6 +74,13 @@ class Perception:
                 If True, the perceived state will instead be a random draw 
                 from the Kalman filter's current estimated joint distribution 
                 for distance and speed. Only relevant if kalman_filter is True. 
+            cos_crossing_angle: float
+                Cosine of the angle between the headings of the ego agent and
+                the other agent (i.e., the dot product of their heading 
+                vectors). Used for the distance between the agents in angular
+                perception. Default is zero, for perpendicular paths. Can also
+                be set as an attribute after construction, before the first 
+                call to .update().
         
         The intended use after __init__ is to call method .update() for each time 
         step in a simulation, after which the attribute .perc_oth_state 
@@ -106,6 +113,7 @@ class Perception:
     prior: KalmanPrior = None
     spd_proc_noise_stddev: float = 0
     draw_from_estimate: bool = False
+    cos_crossing_angle: float = 0.0
     
     
     def update_states(self, i_time_step, ego_state, oth_state):
@@ -123,8 +131,13 @@ class Perception:
         if self.angular_perception:
             # perceiving distance from angle below horizon
             # (see 2021-11-02 handwritten notes)
-            D = math.sqrt(ego_state.signed_CP_dist ** 2 
-                          + oth_state.signed_CP_dist ** 2)
+            if self.cos_crossing_angle == 0:
+                D = math.sqrt(ego_state.signed_CP_dist ** 2 
+                              + oth_state.signed_CP_dist ** 2)
+            else:
+                D = float(sc_scenario_helper.get_inter_agent_dists(
+                    ego_state.signed_CP_dist, oth_state.signed_CP_dist,
+                    self.cos_crossing_angle))
             curr_obs_noise_stddev = (
                 abs(oth_state.signed_CP_dist)
                 * (1 - (self.ego_eye_height
