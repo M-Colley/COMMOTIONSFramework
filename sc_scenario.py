@@ -170,7 +170,8 @@ MIN_BEH_PROB = 0.0 # behaviour probabilities below this value are considered zer
 class States():
     pass
 
-class SCAgent(commotions.AgentWithGoal):
+class SCAgent(commotions.AgentWithGoal, 
+              commotions.AgentWithIntermittentActions):
 
     def prepare_for_simulation(self):
         # make sure this agent isn't used for a simulation with more than two
@@ -411,9 +412,8 @@ class SCAgent(commotions.AgentWithGoal):
 
         # if agent can't reverse and is now at zero speed, make sure that any
         # future negative accelerations from past actions are cleared
-        if not self.can_reverse and self.curr_state.long_speed == 0:
-            self.action_long_accs[i_time_step:] = \
-                np.maximum(0, self.action_long_accs[i_time_step:] )
+        self.clear_future_neg_accs_if_stopped(self.curr_state.long_speed, 
+                                              i_time_step)
 
         # calculate my own current projected time until entering and
         # exiting the conflict area
@@ -1188,12 +1188,12 @@ class SCAgent(commotions.AgentWithGoal):
     def add_action_to_acc_array(self, acc_array, i_action, i_time_step):
         if self.ctrl_type is CtrlType.SPEED:
             acc_value = self.params.ctrl_deltas[i_action] / self.params.DeltaT
-            commotions.add_uniform_action_to_array(acc_array, acc_value, \
-                self.n_action_time_steps, i_time_step)
+            self.add_uniform_action(acc_value, i_time_step, 
+                                    action_array = acc_array)
         elif self.ctrl_type is CtrlType.ACCELERATION:
             acc_delta = self.params.ctrl_deltas[i_action]
-            commotions.add_linear_ramp_action_to_array(acc_array, acc_delta, \
-                self.n_action_time_steps, i_time_step)
+            self.add_ramp_action(acc_delta, i_time_step, 
+                                 action_array = acc_array)
         else:
             raise RuntimeError('Unexpected control type %s.' % self.ctrl_type)
 
@@ -1201,11 +1201,8 @@ class SCAgent(commotions.AgentWithGoal):
         local_long_accs = np.copy(self.action_long_accs)
         self.add_action_to_acc_array(
                 local_long_accs, i_action, self.simulation.state.i_time_step)
-        predicted_state = self.get_future_kinematic_state(
-                local_long_accs, yaw_rate = 0, 
-                n_time_steps_to_advance = self.n_prediction_time_steps)
-        predicted_state.long_acc = local_long_accs[
-                self.simulation.state.i_time_step + self.n_prediction_time_steps]
+        predicted_state = self.get_predicted_state(local_long_accs, 
+                                                   yaw_rates = 0)
         # add SC scenario specific state info
         predicted_state = self.add_sc_state_info(predicted_state, self.coll_dist)
         return predicted_state
@@ -1469,19 +1466,13 @@ class SCAgent(commotions.AgentWithGoal):
             spd_proc_noise_stddev = self.params.sigma_xdot,
             draw_from_estimate = True)
 
-        # POSSIBLE TODO: absorb this into a new class 
-        #                commotions.AgentWithIntermittentActions or similar
-        # store derived constants relating to the actions
-        self.n_action_time_steps = math.ceil(
-            self.params.DeltaT / self.simulation.settings.time_step)
-        self.n_prediction_time_steps = math.ceil(self.params.T_P \
-            / self.simulation.settings.time_step)
-        self.n_actions_vector_length = \
-            self.simulation.settings.n_time_steps + self.n_prediction_time_steps
-        # prepare vectors for storing long acc and yaw rates, incl lookahead
-        # with added actions
-        self.action_long_accs = np.zeros(self.n_actions_vector_length)
-        self.action_yaw_rates = np.zeros(self.n_actions_vector_length) # yaw rate should really always remain zero in this class - but leaving this vector here anyway
+        # store derived constants relating to the actions, and prepare 
+        # vectors for storing long acc and yaw rates, incl lookahead with added
+        # actions (yaw rate should really always remain zero in this class - 
+        # but leaving this vector there anyway) - see 
+        # commotions.AgentWithIntermittentActions
+        self.setup_intermittent_actions(action_duration = self.params.DeltaT, 
+                                        prediction_time = self.params.T_P)
 
 
 class SCSimulation(commotions.Simulation):

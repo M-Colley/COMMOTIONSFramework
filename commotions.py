@@ -1,10 +1,3 @@
-# POSSIBLE TODOs:
-# - add class AgentWithIntermittentActions(BaseAgent) that is "cooperative" in 
-#   its __init__ method with AgentWithGoal
-#   see https://rhettinger.wordpress.com/2011/05/26/super-considered-super/
-
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -255,7 +248,22 @@ class BaseAgent:
                 
 
     def __init__(self, name, simulation, initial_state, \
-        initial_action_state = ActionState(), can_reverse = True, plot_color = 'k'):
+        initial_action_state = ActionState(), can_reverse = True, plot_color = 'k',
+        **kwargs):
+        """ Construct the agent and add it to simulation.
+        
+            The __init__ methods of the agent classes in this module are 
+            "cooperative" (see 
+            https://rhettinger.wordpress.com/2011/05/26/super-considered-super/),
+            so that agent classes can be combined using multiple inheritance, 
+            e.g., class MyAgent(AgentWithGoal, AgentWithIntermittentActions).
+            Any keyword arguments not consumed by classes earlier in the 
+            method resolution order are passed on with super().__init__(), 
+            so unexpected keyword arguments raise a TypeError.
+        """
+        # cooperative multiple inheritance - pass on any remaining keyword
+        # arguments (raises TypeError if there are any unexpected ones left)
+        super().__init__(**kwargs)
         # store some basic info about the agent
         self.name = name
         self.can_reverse = can_reverse
@@ -286,7 +294,14 @@ class AgentWithGoal(BaseAgent):
 
 
     def __init__(self, name, simulation, goal, initial_kinematic_state, \
-        initial_action_state = ActionState(), can_reverse = True, plot_color = 'k'):
+        initial_action_state = ActionState(), can_reverse = True, plot_color = 'k',
+        **kwargs):
+        """ Construct an agent with a goal position goal (numpy array of 
+            length 2). If initial_kinematic_state has a position but a yaw angle
+            None, the yaw angle is set to point toward the goal. Any further 
+            keyword arguments are passed on cooperatively to the next class 
+            in the method resolution order (see BaseAgent.__init__).
+        """
         # check if the caller has provided start and goal positions, but no
         # starting yaw angle - if so set it to point at goal
         if (initial_kinematic_state is not None) \
@@ -300,9 +315,137 @@ class AgentWithGoal(BaseAgent):
         if goal is None:
             goal = np.zeros(2)
         self.goal = goal
-        # run ancestor initialisation
-        super().__init__(name, simulation, initial_kinematic_state, \
-            initial_action_state, can_reverse, plot_color)
+        # run ancestor initialisation (passing arguments by keyword, to 
+        # support cooperative multiple inheritance)
+        super().__init__(name = name, simulation = simulation, 
+                         initial_state = initial_kinematic_state,
+                         initial_action_state = initial_action_state, 
+                         can_reverse = can_reverse, plot_color = plot_color,
+                         **kwargs)
+
+
+class AgentWithIntermittentActions(BaseAgent):
+    """ An agent which controls its longitudinal acceleration (and, in 
+        principle, yaw rate) by means of intermittent actions of a fixed 
+        duration, which are added on top of each other in lookahead arrays 
+        extending beyond the end of the simulation by the prediction time.
+        
+        The __init__ method is cooperative (see BaseAgent.__init__), so this
+        class can be combined with e.g. AgentWithGoal:
+            
+            class MyAgent(AgentWithGoal, AgentWithIntermittentActions):
+                ...
+                
+        The action timing can be set either at construction, with the keyword 
+        arguments action_duration (s) and prediction_time (s; defaults to 
+        action_duration), or later by calling setup_intermittent_actions(), 
+        e.g., if the descendant class needs to parse its parameters before
+        knowing the action duration. The action-related attributes 
+        (n_action_time_steps, n_prediction_time_steps, n_actions_vector_length,
+        action_long_accs, action_yaw_rates) are available after either of these.
+    """
+    
+    def __init__(self, *args, action_duration = None, prediction_time = None, 
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        if action_duration is not None:
+            self.setup_intermittent_actions(action_duration, prediction_time)
+        elif prediction_time is not None:
+            raise ValueError('Cannot specify prediction_time without'
+                             ' action_duration.')
+    
+    
+    def setup_intermittent_actions(self, action_duration, 
+                                   prediction_time = None):
+        """ Store the action duration and prediction time (both in seconds;
+            prediction_time defaults to action_duration), the derived numbers
+            of simulation time steps, and allocate zeroed lookahead vectors
+            action_long_accs and action_yaw_rates, of length equal to the 
+            number of simulation time steps plus the number of prediction time 
+            steps.
+        """
+        if prediction_time is None:
+            prediction_time = action_duration
+        self.action_duration = action_duration
+        self.prediction_time = prediction_time
+        # store derived constants relating to the actions
+        self.n_action_time_steps = math.ceil(
+            action_duration / self.simulation.settings.time_step)
+        self.n_prediction_time_steps = math.ceil(prediction_time \
+            / self.simulation.settings.time_step)
+        self.n_actions_vector_length = \
+            self.simulation.settings.n_time_steps + self.n_prediction_time_steps
+        # prepare vectors for storing long acc and yaw rates, incl lookahead
+        # with added actions
+        self.action_long_accs = np.zeros(self.n_actions_vector_length)
+        self.action_yaw_rates = np.zeros(self.n_actions_vector_length)
+        
+        
+    def add_uniform_action(self, action_magnitude, i_start_time_step = None, 
+                           action_array = None):
+        """ Add a constant action_magnitude over n_action_time_steps starting
+            at i_start_time_step (default: current simulation time step), to 
+            action_array (default: self.action_long_accs).
+        """
+        if action_array is None:
+            action_array = self.action_long_accs
+        if i_start_time_step is None:
+            i_start_time_step = self.simulation.state.i_time_step
+        add_uniform_action_to_array(action_array, action_magnitude, 
+                                    self.n_action_time_steps, i_start_time_step)
+        
+        
+    def add_ramp_action(self, action_magnitude, i_start_time_step = None, 
+                        action_array = None):
+        """ Add a linear ramp from zero to action_magnitude over 
+            n_action_time_steps starting at i_start_time_step (default: current
+            simulation time step), followed by action_magnitude for the rest of
+            action_array (default: self.action_long_accs).
+        """
+        if action_array is None:
+            action_array = self.action_long_accs
+        if i_start_time_step is None:
+            i_start_time_step = self.simulation.state.i_time_step
+        add_linear_ramp_action_to_array(action_array, action_magnitude, 
+                                        self.n_action_time_steps, 
+                                        i_start_time_step)
+        
+        
+    def clear_future_neg_accs_if_stopped(self, long_speed, 
+                                         i_time_step = None):
+        """ If the agent can't reverse and long_speed is zero, make sure that 
+            any future negative accelerations from past actions, from 
+            i_time_step (default: current simulation time step) onward, are 
+            cleared from self.action_long_accs.
+        """
+        if i_time_step is None:
+            i_time_step = self.simulation.state.i_time_step
+        if not self.can_reverse and long_speed == 0:
+            self.action_long_accs[i_time_step:] = \
+                np.maximum(0, self.action_long_accs[i_time_step:] )
+            
+            
+    def get_predicted_state(self, long_accs = None, yaw_rates = None):
+        """ Return the KinematicState of the agent n_prediction_time_steps 
+            ahead of the current simulation time step, given the action vectors
+            long_accs and yaw_rates (defaults: self.action_long_accs and 
+            self.action_yaw_rates; scalars are also accepted). The returned 
+            state also has an attribute long_acc, with the longitudinal 
+            acceleration at the predicted time step.
+        """
+        if long_accs is None:
+            long_accs = self.action_long_accs
+        if yaw_rates is None:
+            yaw_rates = self.action_yaw_rates
+        predicted_state = self.get_future_kinematic_state(
+                long_accs, yaw_rate = yaw_rates, 
+                n_time_steps_to_advance = self.n_prediction_time_steps)
+        if type(long_accs) is np.ndarray:
+            predicted_state.long_acc = long_accs[
+                self.simulation.state.i_time_step + self.n_prediction_time_steps]
+        else:
+            predicted_state.long_acc = long_accs
+        return predicted_state
 
 
 class SimulationSettings:
