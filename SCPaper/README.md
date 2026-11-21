@@ -20,6 +20,11 @@ The `results` folder contains all intermediate results files saved while generat
 
 Some of the scripts use the `multiprocessing` module to run model simulations over multiple cores, which can cause problems in some environments. Typically there is a variable `PARALLEL` that can be set to `False` to run serially instead.
 
+## Explicit Communication (eHMI) and Asymmetric Agents
+
+* **Explicit communication (`oEC`)**: Enabling the optional assumption `oEC` (e.g. `'oVAoBEvoAIoEC'`) lets an observing agent incorporate explicit eHMI cues displayed by the other agent (`ehmi_signals` in `sc_scenario.SCSimulation`, `veh_ehmi_time` in `sc_fitting.SCPaperScenario` / `sc_run.run_simulation`, and `sc_fitting.HIKER_EHMI_SCENARIOS` for the HIKER yielding-with-eHMI conditions). Cue evidence $E_b(t)$ is low-pass filtered with time constant `T_E` and weighted by `beta_E` in the behaviour belief activations (`'yield'` supporting `Pass 2nd`, `'proceed'` supporting `Pass 1st`). Setting `INCLUDE_EHMI = True` in `do_10_get_empirical_HIKER_CITs.py` additionally extracts the empirical `has_ehmi == True` HIKER trials under `'_y_e'` scenario keys.
+* **Per-agent assumptions and parameters**: `SCSimulation`, `sc_fitting.simulate_scenario`, `sc_fitting.construct_model_and_simulate_scenario`, and `sc_run.run_simulation` accept 2-tuples `(pedestrian_spec, vehicle_spec)` for models, assumptions, and parameter dictionaries when simulating asymmetric interactions (e.g., an eHMI-equipped automated vehicle interacting with a human pedestrian model).
+
 The bulk of the results in this repository and in the paper was generated on the ARC4 cluster mentioned above, running Python 3.7.4, with package versions from the [Anaconda 2019.10 release](https://docs.anaconda.com/anaconda/reference/release-notes/#anaconda-2019-10-october-15-2019) (as described on [this ARC4 page](https://arcdocs.leeds.ac.uk/software/compilers/anaconda.html), accessed 2022-05-26). Some results, and all figures, were generated on the lead author's own computer, running Python 3.9.2, with package versions from the [WinPython 2021-01 release](https://winpython.github.io/); in cases where the same analyses were tested in both places the obtained results were identical between the two.
 
 ---

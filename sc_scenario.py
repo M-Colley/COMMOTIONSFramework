@@ -36,6 +36,7 @@ class OptionalAssumption(Enum):
     oBEv = 'oBEv'
     oBEc = 'oBEc'
     oAI = 'oAI'
+    oEC = 'oEC' # explicit communication: observing the other agent's eHMI cues
 
 def get_assumptions_dict(default_value = False, **kwargs):
     """ Return a dictionary with all the members of OptionalAssumption as keys.
@@ -67,7 +68,7 @@ def get_assumptions_dict_from_string(string):
     return assumptions_dict
 
 class DerivedAssumption(Enum):
-    dBE = 'dBE'
+    dBE = 'dBE' # behaviour estimation: oBEo or oBEv or oEC
     
 
 class SimStopCriterion(Enum):
@@ -87,6 +88,117 @@ N_BEHAVIORS = len(BEHAVIORS)
 i_CONSTANT = 0
 i_PASS1ST = 1
 i_PASS2ND = 2
+
+# explicit communication (eHMI) cues that an agent can display, and the 
+# behaviour of the displaying agent that each cue announces (from the 
+# perspective of an observing agent, whose beliefs are over the behaviours of 
+# the displaying agent): 'yield' = the displaying agent will pass second, 
+# 'proceed' = the displaying agent will pass first
+EHMI_CUE_YIELD = 'yield'
+EHMI_CUE_PROCEED = 'proceed'
+EHMI_CUE_BEHAVIORS = {EHMI_CUE_YIELD: i_PASS2ND, EHMI_CUE_PROCEED: i_PASS1ST}
+
+
+def parse_ehmi_signal(ehmi_signal):
+    """
+    Parse and validate an eHMI signal specification, as accepted by the
+    ehmi_signal argument of SCAgent.__init__().
+
+    Parameters
+    ----------
+    ehmi_signal : None, tuple or list
+        None (no eHMI), a single signal specification (t_on, cue) or 
+        (t_on, t_off, cue), or a list (or tuple) of such specifications. cue 
+        must be one of 'yield' (the agent announces it will pass second) or 
+        'proceed' (the agent announces it will pass first). If t_off is not 
+        provided the cue is displayed until the end of the simulation.
+
+    Returns
+    -------
+    list of tuple
+        One (t_on, t_off, cue) tuple per signal specification (empty list if 
+        ehmi_signal is None).
+
+    """
+    if ehmi_signal is None:
+        return []
+    if not isinstance(ehmi_signal, (tuple, list)):
+        raise TypeError('eHMI signal should be None, a (t_on, cue) or'
+                        ' (t_on, t_off, cue) tuple, or a list of such tuples,'
+                        f' but got: {ehmi_signal!r}')
+    if len(ehmi_signal) > 0 and isinstance(ehmi_signal[-1], str):
+        # a single signal specification
+        specs = [ehmi_signal]
+    else:
+        specs = list(ehmi_signal)
+    parsed = []
+    for spec in specs:
+        if (not isinstance(spec, (tuple, list)) or not (len(spec) in (2, 3))
+            or not isinstance(spec[-1], str)):
+            raise ValueError('Each eHMI signal specification should be a'
+                             ' (t_on, cue) or (t_on, t_off, cue) tuple, but'
+                             f' got: {spec!r}')
+        cue = spec[-1]
+        if not cue in EHMI_CUE_BEHAVIORS:
+            raise ValueError(f'Unexpected eHMI cue {cue!r}, expected one of'
+                             f' {tuple(EHMI_CUE_BEHAVIORS.keys())}.')
+        t_on = float(spec[0])
+        if len(spec) == 3:
+            t_off = float(spec[1])
+        else:
+            t_off = math.inf
+        if not t_off > t_on:
+            raise ValueError(f'eHMI signal {spec!r} has t_off <= t_on.')
+        parsed.append((t_on, t_off, cue))
+    return parsed
+
+
+def get_per_agent_values(value, value_name, single_types, allow_none=True):
+    """
+    Return a list of N_AGENTS values from an input which can either be a 
+    single value (to be used for all agents) or a tuple/list with one value
+    per agent.
+
+    Parameters
+    ----------
+    value : object
+        The input value.
+    value_name : str
+        Name of the value, for error messages.
+    single_types : type or tuple of types
+        Accepted types of a single (per-agent) value (tuples and lists are 
+        never accepted as single values).
+    allow_none : bool, optional
+        Whether None is accepted as a single (per-agent) value. The default
+        is True.
+
+    Returns
+    -------
+    list
+        One value per agent.
+
+    """
+    def is_ok_single_value(val):
+        if val is None:
+            return allow_none
+        return (isinstance(val, single_types) 
+                and not isinstance(val, (tuple, list)))
+    if isinstance(value, (tuple, list)):
+        if len(value) != N_AGENTS:
+            raise ValueError(f'Per-agent {value_name} should have length'
+                             f' {N_AGENTS} (one per agent), but got length'
+                             f' {len(value)}.')
+        for i_agent, agent_value in enumerate(value):
+            if not is_ok_single_value(agent_value):
+                raise TypeError(f'Unexpected type {type(agent_value)} of'
+                                f' {value_name} for agent #{i_agent}.')
+        return list(value)
+    elif is_ok_single_value(value):
+        return [value] * N_AGENTS
+    else:
+        raise TypeError(f'Unexpected type {type(value)} of {value_name}:'
+                        f' expected a single value or a tuple/list of'
+                        f' {N_AGENTS} values.')
 
 # =============================================================================
 # BEHAVIORS = ('const.', 'proc.', 'yield')
@@ -112,6 +224,8 @@ DEFAULT_PARAMS.beta_V = 160 # scaling of value evidence in behaviour belief acti
 DEFAULT_PARAMS.T_O1 = 0.1 # "sampling" time constant for behaviour observation (s)
 DEFAULT_PARAMS.T_Of = 0.5 # "forgetting" time constant for behaviour observation (s)
 DEFAULT_PARAMS.sigma_O = 0.01 # std dev of behaviour observation noise (m)
+DEFAULT_PARAMS.beta_E = 3 # scaling of explicit communication (eHMI) cue evidence in behaviour belief activation (for oEC); with fully accumulated cue evidence (E = 1) and no other evidence, the odds for the signalled behaviour increase by a factor exp(beta_E) (~20 for beta_E = 3)
+DEFAULT_PARAMS.T_E = 0.5 # time constant (s) of the low-pass filter for eHMI cue evidence (for oEC)
 DEFAULT_PARAMS.sigma_V = 0.1 # action value noise in evidence accumulation
 #DEFAULT_PARAMS.sigma_Vprime = DEFAULT_PARAMS.sigma_V # behaviour value noise in evidence accumulation
 DEFAULT_PARAMS.DeltaV_th_rel = 0.001 # action decision threshold when doing evidence accumulation, in multiples of squashed V_free
@@ -250,6 +364,8 @@ class SCAgent(commotions.AgentWithGoal):
             math.nan * np.ones((N_BEHAVIORS, n_time_steps)) # P_{x_o|b}(t)
         self.states.beh_long_accs = \
             math.nan * np.ones((N_BEHAVIORS, n_time_steps)) # the acceleration that the other agent should be applying right now if doing behaviour b
+        self.states.ehmi_evidence = \
+            math.nan * np.ones((N_BEHAVIORS, n_time_steps)) # E_b(t), evidence from the other agent's eHMI cues for behaviour b (oEC)
         # - other states
         self.states.time_left_to_CA_entry = math.nan * np.ones(n_time_steps)
         self.states.time_left_to_CA_exit = math.nan * np.ones(n_time_steps)
@@ -260,6 +376,7 @@ class SCAgent(commotions.AgentWithGoal):
         self.states.beh_activ_V_given_actions[:, :, -1] = 0
         self.states.beh_activ_O[:, -1] = 0
         self.states.beh_activ_O[i_CONSTANT, -1] = 0
+        self.states.ehmi_evidence[:, -1] = 0
         # prepare a separate array for storing distances to the conflict point
         self.signed_CP_dists = np.full(n_time_steps, math.nan)
         
@@ -349,6 +466,44 @@ class SCAgent(commotions.AgentWithGoal):
             currXhat += self.rng.standard_normal(len(prevXhat)) * sigma * math.sqrt(
                 self.simulation.settings.time_step)
         return currXhat
+    
+    
+    def get_displayed_ehmi(self, time):
+        """ Return the explicit communication (eHMI) cue displayed by this 
+            agent at a given time: None (no cue), 'yield' (announcing that this 
+            agent will pass second) or 'proceed' (announcing that this agent 
+            will pass first). If several specified signals overlap in time, 
+            the one most recently switched on is returned.
+        """
+        displayed_cue = None
+        latest_t_on = -math.inf
+        for (t_on, t_off, cue) in self.ehmi_signals:
+            if t_on <= time < t_off and t_on >= latest_t_on:
+                displayed_cue = cue
+                latest_t_on = t_on
+        return displayed_cue
+    
+    
+    def update_ehmi_evidence(self, i_time_step):
+        """ Update the evidence E_b(t) from the other agent's explicit 
+            communication (eHMI) cues, for each behaviour b of the other agent 
+            (for oEC). For the behaviour announced by the currently displayed 
+            cue, if any ('yield' -> i_PASS2ND, 'proceed' -> i_PASS1ST), E_b is
+            low-pass filtered with time constant T_E towards one, and for all 
+            other behaviours it is low-pass filtered towards zero.
+        """
+        displayed_cue = self.other_agent.get_displayed_ehmi(
+            self.simulation.state.time)
+        target_evidence = np.zeros(N_BEHAVIORS)
+        if not displayed_cue is None:
+            target_evidence[EHMI_CUE_BEHAVIORS[displayed_cue]] = 1
+        if self.params.T_E > 0:
+            f = min(1, self.simulation.settings.time_step / self.params.T_E)
+        else:
+            f = 1 # no filtering
+        self.states.ehmi_evidence[:, i_time_step] = (
+            (1 - f) * self.states.ehmi_evidence[:, i_time_step-1]
+            + f * target_evidence)
     
     
     def prepare_for_action_update(self):
@@ -674,6 +829,13 @@ class SCAgent(commotions.AgentWithGoal):
         #self.states.action_probs[:, i_time_step] = scipy.special.softmax(\
         #    self.params.Lambda * self.states.est_action_vals[:, i_time_step-1])
 
+        # update the evidence from any explicit communication (eHMI) cues 
+        # displayed by the other agent
+        if self.assumptions[OptionalAssumption.oEC]:
+            self.update_ehmi_evidence(i_time_step)
+        else:
+            self.states.ehmi_evidence[:, i_time_step] = 0
+
         # now loop over the other agent's behaviors, to update the corresponding
         # activations (my "belief" in these behaviors)
         for i_beh in range(N_BEHAVIORS):
@@ -732,6 +894,13 @@ class SCAgent(commotions.AgentWithGoal):
                             i_beh, :, i_time_step] \
                     + self.params.beta_O * \
                         self.states.beh_activ_O[i_beh, i_time_step] 
+                # add any evidence from explicit communication (only if oEC
+                # enabled, to leave activations untouched otherwise)
+                if self.assumptions[OptionalAssumption.oEC]:
+                    self.states.beh_activations_given_actions[
+                        i_beh, :, i_time_step] += (
+                        self.params.beta_E 
+                        * self.states.ehmi_evidence[i_beh, i_time_step])
 
         # get my estimated probabilities for the other agent's behavior
         if self.assumptions[DerivedAssumption.dBE]:
@@ -1310,7 +1479,22 @@ class SCAgent(commotions.AgentWithGoal):
                  inhibit_first_pass_before_time = None, # NB: Currently only supported for oVA models
                  const_acc = None, zero_acc_after_exit = False, 
                  plot_color = 'k',  snapshot_times = None, 
-                 detailed_snapshots = False):
+                 detailed_snapshots = False, ehmi_signal = None):
+        """ Construct an SCAgent. 
+        
+            The optional_assumptions, params and params_k arguments apply to 
+            this agent only (see SCSimulation for how to specify these per 
+            agent). 
+            
+            ehmi_signal specifies any explicit communication (eHMI) cues 
+            displayed by this agent: None (no eHMI; default), a single signal 
+            specification (t_on, cue) or (t_on, t_off, cue), or a list of such 
+            specifications, where cue is 'yield' (announcing that this agent 
+            will pass second) or 'proceed' (announcing that this agent will 
+            pass first). If t_off is omitted, the cue is displayed until the 
+            end of the simulation. The cues only affect an observing agent 
+            which has the oEC assumption enabled. 
+        """
 
         # set control type
         self.ctrl_type = ctrl_type
@@ -1332,6 +1516,9 @@ class SCAgent(commotions.AgentWithGoal):
         self.snapshot_times = snapshot_times
         self.doing_snapshots = snapshot_times != None
         self.detailed_snapshots = detailed_snapshots
+        
+        # any explicit communication (eHMI) cues displayed by this agent
+        self.ehmi_signals = parse_ehmi_signal(ehmi_signal)
         
         # store any optional assumptions provided by the caller
         self.assumptions = get_assumptions_dict(False)
@@ -1410,12 +1597,21 @@ class SCAgent(commotions.AgentWithGoal):
             self.params.beta_O = 0
         if not self.assumptions[OptionalAssumption.oBEv]:
             self.params.beta_V = 0
+        if self.assumptions[OptionalAssumption.oEC]:
+            # explicit communication needs the eHMI parameters
+            for param_name in ('beta_E', 'T_E'):
+                if not hasattr(self.params, param_name):
+                    raise Exception(f'Parameter {param_name} needs to be'
+                                    ' specified to enable oEC.')
+        # (explicit communication implies estimating the other agent's 
+        # behaviour, since the eHMI cues affect the behaviour beliefs)
         self.assumptions[DerivedAssumption.dBE] = \
             self.assumptions[OptionalAssumption.oBEo] \
-            or self.assumptions[OptionalAssumption.oBEv]
+            or self.assumptions[OptionalAssumption.oBEv] \
+            or self.assumptions[OptionalAssumption.oEC]
         if not self.assumptions[DerivedAssumption.dBE]:
             if self.assumptions[OptionalAssumption.oBEc]:
-                warnings.warn('Cannot have oBEc without oBEv or oBEo, so'
+                warnings.warn('Cannot have oBEc without oBEv, oBEo or oEC, so'
                               ' disabling oBEc.')
                 self.assumptions[OptionalAssumption.oBEc] = False
         if not self.assumptions[OptionalAssumption.oVA]:
@@ -1497,7 +1693,44 @@ class SCSimulation(commotions.Simulation):
                  const_accs = (None, None), zero_acc_after_exit = False, 
                  agent_names = ('A', 'B'), plot_colors = ('c', 'm'), 
                  snapshot_times = (None, None), detailed_snapshots = False,
-                 stop_criteria = ()):
+                 stop_criteria = (), ehmi_signals = (None, None)):
+        """ Construct a simulation of two SCAgents.
+        
+            The optional_assumptions, params and params_k arguments can each
+            be either a single object, used for both agents, or a tuple/list 
+            of length two with one object per agent (in the same order as 
+            ctrl_types etc), to allow agents with different model assumptions 
+            and/or parameters (e.g., a pedestrian 'oVAoBEvoAI' and a vehicle 
+            'oVA'): 
+                optional_assumptions: dict (as returned by 
+                    get_assumptions_dict() or 
+                    get_assumptions_dict_from_string()) or tuple/list of two
+                    such dicts.
+                params: None (default parameters), commotions.Parameters, or 
+                    tuple/list of two such values.
+                params_k: None (default value function gains), dict with 
+                    CtrlType keys and commotions.Parameters values, or 
+                    tuple/list of two such values.
+            Note that each agent still assumes that the other agent has the 
+            same parameters as itself (see SCAgent.prepare_for_simulation()).
+                    
+            ehmi_signals is a tuple/list with one explicit communication 
+            (eHMI) signal specification per agent - see the ehmi_signal 
+            argument of SCAgent.__init__().
+        """
+        
+        # parse per-agent model specifications
+        agent_assumptions = get_per_agent_values(
+            optional_assumptions, 'optional_assumptions', dict, 
+            allow_none=False)
+        agent_params = get_per_agent_values(
+            params, 'params', object) # (commotions.Parameters, duck-typed)
+        agent_params_k = get_per_agent_values(params_k, 'params_k', dict)
+        if (not isinstance(ehmi_signals, (tuple, list)) 
+            or len(ehmi_signals) != N_AGENTS):
+            raise ValueError(f'ehmi_signals should be a tuple/list of length'
+                             f' {N_AGENTS} (one per agent), but got:'
+                             f' {ehmi_signals!r}')
 
         super().__init__(start_time, end_time, time_step)
        
@@ -1510,8 +1743,9 @@ class SCSimulation(commotions.Simulation):
                     simulation = self, 
                     goal_pos = goal_positions[i_agent, :], 
                     initial_state = initial_state, 
-                    optional_assumptions = optional_assumptions, 
-                    params = params, params_k = params_k,
+                    optional_assumptions = agent_assumptions[i_agent], 
+                    params = agent_params[i_agent], 
+                    params_k = agent_params_k[i_agent],
                     width = widths[i_agent],
                     length = lengths[i_agent],
                     noise_seed = noise_seeds[i_agent],
@@ -1521,7 +1755,8 @@ class SCSimulation(commotions.Simulation):
                     zero_acc_after_exit = zero_acc_after_exit,
                     plot_color = plot_colors[i_agent],
                     snapshot_times = snapshot_times[i_agent],
-                    detailed_snapshots = detailed_snapshots)
+                    detailed_snapshots = detailed_snapshots,
+                    ehmi_signal = ehmi_signals[i_agent])
         
         self.stop_criteria = stop_criteria
             
@@ -1755,11 +1990,24 @@ class SCSimulation(commotions.Simulation):
                  beh_activs = False, beh_accs = False, beh_probs = False, 
                  sensory_prob_dens = False, kinem_states = False, 
                  veh_stop_dec = False, times_to_ca = False, looming = False,
-                 action_evidences = False):
+                 action_evidences = False, ehmi_evidence = False):
 
         n_plot_actions = max(self.agents[0].n_actions, self.agents[1].n_actions)
         
-        if self.agents[0].assumptions[DerivedAssumption.dBE]:
+        # which behaviours to plot - the agents may differ in whether they
+        # estimate the other agent's behaviour (if they have different 
+        # optional assumptions), so get this per agent, and also overall for
+        # figure layouts shared between the agents
+        def get_plot_behaviors(agent):
+            if agent.assumptions[DerivedAssumption.dBE]:
+                return BEHAVIORS
+            else:
+                return (BEHAVIORS[i_CONSTANT],)
+        agent_plot_behaviors = []
+        for agent in self.agents:
+            agent_plot_behaviors.append(get_plot_behaviors(agent))
+        if any(agent.assumptions[DerivedAssumption.dBE] 
+               for agent in self.agents):
             plot_behaviors = BEHAVIORS
         else:
             plot_behaviors = (BEHAVIORS[i_CONSTANT],)
@@ -1783,14 +2031,14 @@ class SCSimulation(commotions.Simulation):
                     plt.subplot(n_plot_actions, N_AGENTS, \
                                 i_action * N_AGENTS +  i_agent + 1)
                     plt.ylim(-1.1, 1.1)
-                    for i_beh in range(n_plot_behaviors):
+                    for i_beh in range(len(agent_plot_behaviors[i_agent])):
                         plt.plot(self.time_stamps, \
                                  agent.states.action_vals_given_behs[i_action, 
                                                                      i_beh, :])
                     if i_action == 0:
                         plt.title('Agent %s' % agent.name)
                         if i_agent == 1:
-                            plt.legend(plot_behaviors)
+                            plt.legend(agent_plot_behaviors[i_agent])
                     if i_agent == 0:
                         plt.ylabel('$V(%.1f | b)$' % deltav)
 
@@ -1887,23 +2135,30 @@ class SCSimulation(commotions.Simulation):
         if beh_activs:
             # - behavior activations
             for i_agent, agent in enumerate(self.agents):
+                n_agent_plot_behs = len(agent_plot_behaviors[i_agent])
                 figname = ('Behaviour activations - Agent %s (observing %s)' %
                            (agent.name, agent.other_agent.name))
                 plt.figure(figname)
                 plt.clf()
                 fig, axs = plt.subplots(nrows = agent.n_actions+1, 
-                                        ncols = n_plot_behaviors,
+                                        ncols = n_agent_plot_behs,
                                         sharex = 'col', sharey = 'col',
                                         num = figname, figsize = (7, 7),
                                         squeeze = False)
-                for i_beh in range(n_plot_behaviors):
+                for i_beh in range(n_agent_plot_behs):
                     # action observation contribution
                     ax = axs[0, i_beh]
                     ax.plot(self.time_stamps, agent.params.beta_O 
                              * agent.states.beh_activ_O[i_beh, :])
+                    top_legend = ('$\\beta_O A_{O,b}$',)
+                    # explicit communication contribution
+                    if agent.assumptions[OptionalAssumption.oEC]:
+                        ax.plot(self.time_stamps, agent.params.beta_E 
+                                * agent.states.ehmi_evidence[i_beh, :])
+                        top_legend += ('$\\beta_E E_b$',)
                     ax.set_title(BEHAVIORS[i_beh])
-                    if i_beh == n_plot_behaviors-1:
-                        ax.legend(('$\\beta_O A_{O,b}$',))
+                    if i_beh == n_agent_plot_behs-1:
+                        ax.legend(top_legend)
                     # value contribution and total activation - both per action
                     for i_action, deltav in enumerate(agent.params.ctrl_deltas):
                         ax = axs[i_action+1, i_beh]
@@ -1915,7 +2170,7 @@ class SCSimulation(commotions.Simulation):
                                  agent.states.beh_activations_given_actions[
                                          i_beh, i_action, :])
                         #plt.ylim(-2, 5)
-                        if i_beh == n_plot_behaviors-1 and i_action == 0:
+                        if i_beh == n_agent_plot_behs-1 and i_action == 0:
                             ax.legend(('$\\beta_V A_{V,b|a}$', '$A_{b|a}$'))
                         if i_beh == 0:
                             ax.set_ylabel('$\\Delta v=%.1f$' % deltav)
@@ -1926,7 +2181,7 @@ class SCSimulation(commotions.Simulation):
                        figsize = (10.0, 10.0))
             plt.clf()
             for i_agent, agent in enumerate(self.agents):
-                for i_beh in range(n_plot_behaviors):
+                for i_beh in range(len(agent_plot_behaviors[i_agent])):
                     plt.subplot(n_plot_behaviors, N_AGENTS, 
                                 i_beh * N_AGENTS + i_agent + 1)
                     plt.plot(self.time_stamps, agent.states.beh_long_accs[i_beh, :], 
@@ -1952,7 +2207,7 @@ class SCSimulation(commotions.Simulation):
             for i_agent, agent in enumerate(self.agents):
                 for i_action, deltav in enumerate(agent.params.ctrl_deltas):
                     ax = axs[i_action, i_agent]
-                    for i_beh in range(n_plot_behaviors):
+                    for i_beh in range(len(agent_plot_behaviors[i_agent])):
                         # plt.subplot(N_BEHAVIORS, N_AGENTS, i_beh * N_AGENTS +  i_agent + 1)
                         ax.plot(self.time_stamps, 
                                  agent.states.beh_probs_given_actions[
@@ -1964,14 +2219,14 @@ class SCSimulation(commotions.Simulation):
                     if i_agent == 0:
                         ax.set_ylabel('$P_{b|\\Delta v=%.1f}$ (-)' % deltav)
                     elif i_action == 0:
-                        ax.legend(plot_behaviors)
+                        ax.legend(agent_plot_behaviors[i_agent])
                     
         if sensory_prob_dens:
             # - sensory probability densities
             plt.figure('Sensory probability densities')
             plt.clf()
             for i_agent, agent in enumerate(self.agents):
-                for i_beh in range(n_plot_behaviors):
+                for i_beh in range(len(agent_plot_behaviors[i_agent])):
                     plt.subplot(n_plot_behaviors, N_AGENTS, 
                                 i_beh * N_AGENTS + i_agent + 1)
                     plt.plot(self.time_stamps, \
@@ -2017,6 +2272,45 @@ class SCSimulation(commotions.Simulation):
             plt.legend(legend_strs)
             plt.xlabel('Time (s)')
             plt.ylabel(r'$\dot{\theta}$ (rad/s)')
+            
+        if ehmi_evidence:
+            # - explicit communication (eHMI) cues and evidence (oEC)
+            figname = 'eHMI evidence'
+            plt.figure(figname)
+            plt.clf()
+            fig, axs = plt.subplots(nrows = 1, ncols = N_AGENTS, 
+                                    sharex = True, sharey = True, 
+                                    num = figname, figsize = (8, 3),
+                                    squeeze = False)
+            for i_agent, agent in enumerate(self.agents):
+                ax = axs[0, i_agent]
+                # periods with a cue displayed by the other agent (shown as a
+                # line at one, nan if no cue)
+                cue_shown = np.full(len(self.time_stamps), math.nan)
+                for i_time, time in enumerate(self.time_stamps):
+                    cue = agent.other_agent.get_displayed_ehmi(time)
+                    if not cue is None:
+                        cue_shown[i_time] = 1
+                legend_strs = []
+                for i_beh in (i_PASS1ST, i_PASS2ND):
+                    ax.plot(self.time_stamps, 
+                            agent.states.ehmi_evidence[i_beh, :])
+                    legend_strs.append(f'$E$ ({BEHAVIORS[i_beh]})')
+                ax.plot(self.time_stamps, cue_shown, 'k:', lw=3, 
+                        alpha=0.5)
+                legend_strs.append('cue shown')
+                ax.set_ylim(-.1, 1.1)
+                ax.set_xlabel('Time (s)')
+                ax.set_title('Agent %s (observing %s)' % 
+                             (agent.name, agent.other_agent.name))
+                if not agent.assumptions[OptionalAssumption.oEC]:
+                    ax.text(0.5, 0.5, '(oEC not enabled)', 
+                            transform=ax.transAxes, ha='center', 
+                            color='gray')
+                if i_agent == 0:
+                    ax.set_ylabel('eHMI evidence (-)')
+                else:
+                    ax.legend(legend_strs)
             
             
         plt.show()
