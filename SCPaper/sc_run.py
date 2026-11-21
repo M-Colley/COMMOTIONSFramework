@@ -64,7 +64,7 @@ def get_model_with_params(model_name, param_bounds=None):
 
 def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
                    ped_prio=False, params_dict=None, idx_parameterisation=None, 
-                   noise_seeds=(None, None)):
+                   noise_seeds=(None, None), crossing_angle=90):
     """ Run one simulation.
     
         Parameters
@@ -97,6 +97,10 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
             None, the value will be used to initialise the random number
             generator for this agent. Only relevant for stochastic model variants.
             Default: (None, None)
+        crossing_angle: float
+            Angle, in degrees, between the headings of the pedestrian and the 
+            car (strictly between 0 and 180). Default: 90 (perpendicular 
+            crossing).
         
         Returns
         -------
@@ -119,8 +123,9 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
     # define SCPaperScenario object
     # - calculate initial times to conflict area from distances and speeds
     #   (assuming non-zero speeds for now)
+    agent_coll_dists = sc_fitting.get_agent_coll_dists(crossing_angle)
     initial_ttcas = ((initial_cp_distances 
-                      - np.array(sc_fitting.AGENT_COLL_DISTS)) 
+                      - np.array(agent_coll_dists)) 
                      / initial_speeds)             
     # - handle zero speeds
     # -- pedestrian
@@ -146,7 +151,8 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
                                           ped_initial_speed=initial_speeds[sc_fitting.i_PED_AGENT],
                                           veh_initial_speed=initial_speeds[sc_fitting.i_VEH_AGENT],
                                           time_step=time_step,
-                                          end_time=end_time)
+                                          end_time=end_time,
+                                          crossing_angle=crossing_angle)
     # run simulation
     sc_simulation = sc_fitting.construct_model_and_simulate_scenario(model_name, params_dict, scenario)
     return sc_simulation

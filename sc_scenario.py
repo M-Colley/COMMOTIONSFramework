@@ -181,18 +181,29 @@ class SCAgent(commotions.AgentWithGoal,
         for agent in self.simulation.agents:
             if agent is not self:
                 self.other_agent = agent
+        # get the cosine and (absolute) sine of the angle between the two 
+        # agents' headings - snapped to exactly (0, 1) for perpendicular paths,
+        # and raising an error for (anti)parallel paths
+        (self.cos_crossing_angle, self.sin_crossing_angle) = \
+            sc_scenario_helper.get_crossing_cos_sin(
+                self.trajectory.yaw_angle[0], 
+                self.other_agent.trajectory.yaw_angle[0])
+        crossing_angle = math.atan2(self.sin_crossing_angle, 
+                                    self.cos_crossing_angle)
         # store a (correct) "image" of oneself 
         # [not quite generalisable to store the collision distance as part of 
         #  this image, since it is a function of the other agent also...]
         self.coll_dist = sc_scenario_helper.get_agent_coll_dist(
-            self.length, self.other_agent.width)
+            self.length, self.other_agent.width, ego_width = self.width, 
+            crossing_angle = crossing_angle)
         self.self_image = SCAgentImage(ctrl_type = self.ctrl_type, 
                                        params = self.params, 
                                        v_free = self.v_free,
                                        g_free = self.g_free,
                                        V_free = self.V_free,
                                        coll_dist = self.coll_dist,
-                                       eff_width = self.eff_width)
+                                       eff_width = self.eff_width,
+                                       cos_crossing_angle = self.cos_crossing_angle)
         # store an "image" of the other agent, with parameters assumed same as 
         # own parameters (but for the appropriate ctrl type)
         oth_params = copy.copy(self.params)
@@ -202,14 +213,19 @@ class SCAgent(commotions.AgentWithGoal,
         oth_g_free = self.other_agent.g_free
         oth_V_free = self.other_agent.V_free
         oth_coll_dist = sc_scenario_helper.get_agent_coll_dist(
-            self.other_agent.length, self.width)
+            self.other_agent.length, self.width, 
+            ego_width = self.other_agent.width, 
+            crossing_angle = crossing_angle)
         self.oth_image = SCAgentImage(ctrl_type = self.other_agent.ctrl_type,
                                       params = oth_params, 
                                       v_free = oth_v_free,
                                       g_free = oth_g_free,
                                       V_free = oth_V_free,
                                       coll_dist = oth_coll_dist,
-                                      eff_width = self.other_agent.eff_width)
+                                      eff_width = self.other_agent.eff_width,
+                                      cos_crossing_angle = self.cos_crossing_angle)
+        # let the perception object know about the crossing angle
+        self.perception.cos_crossing_angle = self.cos_crossing_angle
         # allocate vectors for storing internal states
         n_time_steps = self.simulation.settings.n_time_steps
         self.states = States()
@@ -448,7 +464,8 @@ class SCAgent(commotions.AgentWithGoal,
             # calculate and store looming state information - not used except for
             # visualisation
             self.states.thetaDot[i_time_step] = sc_scenario_helper.get_agent_optical_exp(
-                self.curr_state, self.other_agent.curr_state, self.oth_image)
+                self.curr_state, self.other_agent.curr_state, self.oth_image,
+                self.oth_image.cos_crossing_angle)
 
         # calculate the accelerations needed for the different behaviors of the 
         # other agent, as of the current time 
@@ -960,7 +977,8 @@ class SCAgent(commotions.AgentWithGoal,
                 if ttc > 0 and ttc < math.inf:
                     # on a collision course, get looming and calculate value
                     thetaDot = sc_scenario_helper.get_agent_optical_exp(
-                        ego_pred_state, oth_pred_state, oth_image)
+                        ego_pred_state, oth_pred_state, oth_image,
+                        oth_image.cos_crossing_angle)
                     if thetaDot > ego_image.params.thetaDot_0:
                         looming_value = (-ego_image.V_free
                                          * (thetaDot - ego_image.params.thetaDot_0)
@@ -1475,7 +1493,59 @@ class SCAgent(commotions.AgentWithGoal,
                                         prediction_time = self.params.T_P)
 
 
+def get_crossing_geometry(crossing_angle_deg, initial_cp_dists, 
+                          goal_dists = (5, 50)):
+    """ Return a tuple (initial_positions, goal_positions) of 2 x 2 numpy 
+        arrays (one row per agent), for use as the corresponding arguments to 
+        SCSimulation, for two agents on straight paths crossing at the origin
+        (the conflict point).
+        
+        Agent 0 travels in the positive y direction, starting 
+        initial_cp_dists[0] before the conflict point, with its goal 
+        goal_dists[0] beyond it. Agent 1 travels in a direction rotated 
+        crossing_angle_deg degrees (counterclockwise) relative to agent 0, 
+        i.e., with heading (-sin(theta), cos(theta)), starting 
+        initial_cp_dists[1] before the conflict point, with its goal 
+        goal_dists[1] beyond it. The crossing angle is the angle between the 
+        two agents' headings, and must be strictly between 0 and 180 degrees.
+        
+        For crossing_angle_deg = 90 the standard perpendicular SC scenario 
+        geometry is returned exactly (agent 0 at (0, -d0), goal (0, g0); agent 1
+        at (d1, 0), goal (-g1, 0)).
+    """
+    if crossing_angle_deg == 90:
+        # standard perpendicular crossing - avoid any rounding from cos/sin
+        initial_positions = np.array([[0, -initial_cp_dists[0]],
+                                      [initial_cp_dists[1], 0]])
+        goal_positions = np.array([[0, goal_dists[0]], [-goal_dists[1], 0]])
+        return initial_positions, goal_positions
+    if not (0 < crossing_angle_deg < 180):
+        raise ValueError('Crossing angle must be strictly between 0 and 180'
+                         f' degrees, got {crossing_angle_deg}.')
+    theta = math.radians(crossing_angle_deg)
+    sc_scenario_helper.get_crossing_cos_sin(theta, 0)
+    headings = np.array([[0., 1.], [-math.sin(theta), math.cos(theta)]])
+    initial_positions = np.full((N_AGENTS, 2), math.nan)
+    goal_positions = np.full((N_AGENTS, 2), math.nan)
+    for i_agent in range(N_AGENTS):
+        initial_positions[i_agent, :] = (-initial_cp_dists[i_agent] 
+                                         * headings[i_agent, :])
+        goal_positions[i_agent, :] = goal_dists[i_agent] * headings[i_agent, :]
+    return initial_positions, goal_positions
+        
+
 class SCSimulation(commotions.Simulation):
+    """ A simulation of two SCAgent objects on straight, crossing paths, which
+        must cross at the origin (the conflict point). The paths are defined
+        by initial_positions and goal_positions (2 x 2 numpy arrays, one row 
+        per agent), with agent yaw angles set to point from initial position
+        toward goal. The crossing angle need not be 90 degrees (but the paths 
+        must not be parallel); see get_crossing_geometry() for a convenient
+        way of setting up initial and goal positions for a given crossing 
+        angle. All crossing-angle-dependent calculations (conflict space extents,
+        inter-agent distances and looming, angular perception) reduce exactly 
+        to the original perpendicular expressions for perpendicular paths.
+    """
 
     def __init__(self, ctrl_types, widths, lengths,
                  goal_positions, initial_positions, 
@@ -1583,9 +1653,12 @@ class SCSimulation(commotions.Simulation):
             #yaw_angle = agent.trajectory.yaw_angle[0] # constant throughout in SC scenario
             #yaw_vector = np.array((math.cos(yaw_angle), math.sin(yaw_angle)))
             #agent.signed_CP_dists = np.dot(vectors_to_CP, yaw_vector)
-            # entry time/sample
-            ca_entered = np.nonzero(np.linalg.norm(agent.trajectory.pos, axis = 0)
-                                    <= agent.coll_dist)[0]
+            # entry time/sample (based on the Euclidean distance to the 
+            # conflict point, valid for any crossing angle)
+            dists_to_CP = np.linalg.norm(
+                agent.trajectory.pos - np.reshape(self.conflict_point, (2, 1)), 
+                axis = 0)
+            ca_entered = np.nonzero(dists_to_CP <= agent.coll_dist)[0]
             if len(ca_entered) == 0:
                 agent.ca_entry_sample = math.inf
                 agent.ca_entry_time = math.inf

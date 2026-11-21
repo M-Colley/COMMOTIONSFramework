@@ -78,6 +78,23 @@ for i_ag in range(N_AGENTS):
     AGENT_COLL_DISTS.append(sc_scenario_helper.get_agent_coll_dist(
         AGENT_LENGTHS[i_ag], AGENT_WIDTHS[1-i_ag]))
     
+def get_agent_coll_dists(crossing_angle=90):
+    """ Return a list with the collision distances (conflict space 
+        half-lengths along each agent's path, see 
+        sc_scenario_helper.get_agent_coll_dist()) of the pedestrian and 
+        vehicle agents, for paths crossing at crossing_angle degrees. For the 
+        default 90 degrees, AGENT_COLL_DISTS is returned.
+    """
+    if crossing_angle == 90:
+        return AGENT_COLL_DISTS
+    coll_dists = []
+    for i_ag in range(N_AGENTS):
+        coll_dists.append(sc_scenario_helper.get_agent_coll_dist(
+            AGENT_LENGTHS[i_ag], AGENT_WIDTHS[1-i_ag], 
+            ego_width=AGENT_WIDTHS[i_ag], 
+            crossing_angle=math.radians(crossing_angle)))
+    return coll_dists
+    
 
 # model parameter values kept fixed in these fits
 # - fixed value function gains, affordance-based
@@ -209,13 +226,14 @@ class SCPaperScenario:
             else:
                 initial_ttcas.append(self.initial_ttcas[i_agent])
         # - get the corresponding initial distances
+        agent_coll_dists = self.get_agent_coll_dists()
         initial_cp_distances = (np.array(initial_ttcas) * self.initial_speeds 
-                                + np.array(AGENT_COLL_DISTS))
+                                + np.array(agent_coll_dists))
         # - get any constant accelerations
         const_accs = [None, None]
         if self.ped_start_standing:
             initial_cp_distances[i_PED_AGENT] = (
-                AGENT_COLL_DISTS[i_PED_AGENT] + self.ped_standing_margin)
+                agent_coll_dists[i_PED_AGENT] + self.ped_standing_margin)
         if self.ped_const_speed:
             const_accs[i_PED_AGENT] = 0
         if self.veh_const_speed:
@@ -225,11 +243,25 @@ class SCPaperScenario:
                                        self.veh_yielding_start_time
                                        * self.initial_speeds[i_VEH_AGENT])
             stop_dist = (veh_dist_at_yield_start 
-                         - AGENT_COLL_DISTS[i_VEH_AGENT] 
+                         - agent_coll_dists[i_VEH_AGENT] 
                          - self.veh_yielding_margin)
             const_accs[i_VEH_AGENT] = ((self.veh_yielding_start_time, 
                 -self.initial_speeds[i_VEH_AGENT] ** 2 / (2 * stop_dist)),)
         return initial_cp_distances, const_accs
+    
+    
+    def get_crossing_angle(self):
+        """ Return the crossing angle of the scenario, in degrees (90 for 
+            scenario objects created before this attribute was introduced).
+        """
+        return getattr(self, 'crossing_angle', 90)
+    
+    
+    def get_agent_coll_dists(self):
+        """ Return the agents' collision distances for the crossing angle of
+            this scenario (AGENT_COLL_DISTS for perpendicular crossings).
+        """
+        return get_agent_coll_dists(self.get_crossing_angle())
         
     
     def __init__(self, name, initial_ttcas, ped_prio=False,
@@ -241,7 +273,7 @@ class SCPaperScenario:
                  veh_yielding_margin=COLLISION_MARGIN,
                  inhibit_first_pass_before_time=None,
                  time_step=DET_SIM_TIME_STEP, end_time=DET_SIM_END_TIME,
-                 stop_criteria = (), metric_names = None):
+                 stop_criteria = (), metric_names = None, crossing_angle=90):
         """ Construct a scenario. 
             
             initial_ttcas should be a tuple defining the initial times to
@@ -251,9 +283,23 @@ class SCPaperScenario:
             instead of a numerical value, a tuple of numerical values can be
             provided; if so these define different variations to the scenario.  
             
+            crossing_angle is the angle, in degrees, between the headings of 
+            the pedestrian and the vehicle (strictly between 0 and 180; 
+            default 90, i.e., the standard perpendicular crossing used in the
+            paper). For non-perpendicular crossings, the conflict space extents
+            used to convert initial_ttcas to distances are crossing-angle-aware,
+            and the agents' initial and goal positions are obtained from 
+            sc_scenario.get_crossing_geometry().
+            
         """
         # store scenario info
         self.name = name
+        if crossing_angle != 90:
+            if not (0 < crossing_angle < 180):
+                raise ValueError('Crossing angle must be strictly between 0'
+                                 f' and 180 degrees, got {crossing_angle}.')
+            get_agent_coll_dists(crossing_angle)
+        self.crossing_angle = crossing_angle
         self.ped_prio = ped_prio
         self.ped_start_standing = ped_start_standing
         self.ped_standing_margin = ped_standing_margin
@@ -591,9 +637,16 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
     if scenario.n_variations > 1 and i_variation == None:
         raise Exception('Need to specify scenario variation to run.')
     initial_cp_dists, const_accs = scenario.get_dists_and_accs(i_variation)
-    # - initial position
-    initial_pos = np.array([[0, -initial_cp_dists[i_PED_AGENT]],
-                           [initial_cp_dists[i_VEH_AGENT], 0]])
+    # - initial and goal positions
+    crossing_angle = scenario.get_crossing_angle()
+    if crossing_angle == 90:
+        initial_pos = np.array([[0, -initial_cp_dists[i_PED_AGENT]],
+                               [initial_cp_dists[i_VEH_AGENT], 0]])
+        goal_pos = AGENT_GOALS
+    else:
+        goal_dists = np.linalg.norm(AGENT_GOALS, axis=1)
+        initial_pos, goal_pos = sc_scenario.get_crossing_geometry(
+            crossing_angle, initial_cp_dists, goal_dists=goal_dists)
     # - pedestrian priority?
     if scenario.ped_prio:
         params.V_ny_rel = V_NY_REL
@@ -623,7 +676,7 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
     sc_simulation = sc_scenario.SCSimulation(
         ctrl_types=AGENT_CTRL_TYPES, 
         widths=AGENT_WIDTHS, lengths=AGENT_LENGTHS, 
-        goal_positions=AGENT_GOALS, initial_positions=initial_pos, 
+        goal_positions=goal_pos, initial_positions=initial_pos, 
         initial_speeds=scenario.initial_speeds, 
         const_accs=const_accs, zero_acc_after_exit=zero_acc_after_exit,
         start_time=0, end_time=scenario.end_time, time_step=scenario.time_step, 
