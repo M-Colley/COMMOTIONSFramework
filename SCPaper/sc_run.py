@@ -4,6 +4,8 @@ import sc_fitting
 
 
 def is_stochastic_model(model_name):
+    if isinstance(model_name, (tuple, list)):
+        return any(is_stochastic_model(m) for m in model_name)
     for stoch_str in ('oSN', 'oAN'):
         if stoch_str in model_name:
             return True
@@ -62,16 +64,36 @@ def get_model_with_params(model_name, param_bounds=None):
     raise Exception(f'Model "{model_name}" not found in {ret_models_file_name}.')
 
 
+def _resolve_single_agent_model_and_params(model_spec, params_spec, idx_spec):
+    if isinstance(model_spec, str):
+        m_name = model_spec
+        if params_spec is None:
+            raise Exception('Have to provide params_dict if specifying the model using a string identifier.')
+        p_dict = params_spec
+    elif isinstance(model_spec, sc_fitting.ModelWithParams):
+        m_name = model_spec.model
+        if params_spec is not None:
+            p_dict = params_spec
+        elif idx_spec is not None:
+            p_dict = model_spec.get_params_dict(idx_spec)
+        else:
+            raise Exception('Have to provide at least one of params_dict and idx_parameterisation.')
+    else:
+        raise Exception(f'Unexpected type of input parameter model: {type(model_spec)}')
+    return m_name, p_dict
+
+
 def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
                    ped_prio=False, params_dict=None, idx_parameterisation=None, 
-                   noise_seeds=(None, None)):
+                   noise_seeds=(None, None), veh_ehmi_time=None):
     """ Run one simulation.
     
         Parameters
         ----------
-        model: str or sc_fitting.ModelWithParams
-            Either a string model identifier (e.g., 'oVAoBEvoAI') or a 
-            ModelWithParams object.
+        model: str, sc_fitting.ModelWithParams, or 2-tuple thereof
+            Either a string model identifier (e.g., 'oVAoBEvoAI'), a 
+            ModelWithParams object, or a 2-tuple/list with one specification 
+            per agent (pedestrian, car) for asymmetric simulations.
         initial_cp_distances: tuple of float
             Initial distances, in metres, from the centre points of pedestrian 
             and car (in that order) to the crossing point of their trajectories.
@@ -83,13 +105,14 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
         ped_prio: bool
             If True, means that the pedestrian has crossing priority (e.g., zebra
             crossing). Default: False
-        params_dict: dict
+        params_dict: dict or 2-tuple of dict
             A dict with parameter name strings as dict keys and parameter values as
-            dict values. If the type of input parameter model is str, then this 
-            parameter needs to be provided. Default: None
-        idx_parameterisation: int
-            Only considered if input parameter model is of 
-            type sc_fitting.ModelWithParams. An index specifying which 
+            dict values, or a 2-tuple/list of dicts (one per agent). If model is
+            specified using string identifier(s), params_dict must be provided.
+            Default: None
+        idx_parameterisation: int or 2-tuple of int
+            Only considered for agent(s) specified via sc_fitting.ModelWithParams.
+            An index (or per-agent 2-tuple of indices) specifying which
             parameterisation to use from model.params_array. If both this input
             parameter and params_dict are provided, params_dict will be used.
         noise_seeds: 2-tuple of int
@@ -97,25 +120,37 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
             None, the value will be used to initialise the random number
             generator for this agent. Only relevant for stochastic model variants.
             Default: (None, None)
+        veh_ehmi_time: float, optional
+            If not None, time (s) from which the car displays an explicit 'yield'
+            eHMI signal (for oEC models). Default: None
         
         Returns
         -------
         An sc_scenario.SCSimulation object with the simulation results.  
     """
-    # get model name and params dict
-    if isinstance(model, str):
-        model_name = model
-        if params_dict is None:
-            raise Exception('Have to provide params_dict if specifying the model using a string identifier.')
-    elif isinstance(model, sc_fitting.ModelWithParams):
-        model_name = model.model
-    else: 
-        raise Exception(f'Unexpected type of input parameter model: {type(model)}')
-    # get model parameters dict
-    if params_dict is None:
-        if idx_parameterisation is None:
-            raise Exception('Have to provide at least one of params_dict and idx_parameterisation.')
-        params_dict = model.get_params_dict(idx_parameterisation)
+    is_asymmetric = (isinstance(model, (tuple, list))
+                     or isinstance(params_dict, (tuple, list))
+                     or isinstance(idx_parameterisation, (tuple, list)))
+    if not is_asymmetric:
+        model_name, params_dict = _resolve_single_agent_model_and_params(
+            model, params_dict, idx_parameterisation)
+    else:
+        models_per_ag = (list(model) if isinstance(model, (tuple, list))
+                         else [model] * sc_fitting.N_AGENTS)
+        params_per_ag = (list(params_dict) if isinstance(params_dict, (tuple, list))
+                         else [params_dict] * sc_fitting.N_AGENTS)
+        idxs_per_ag = (list(idx_parameterisation)
+                       if isinstance(idx_parameterisation, (tuple, list))
+                       else [idx_parameterisation] * sc_fitting.N_AGENTS)
+        if (len(models_per_ag) != sc_fitting.N_AGENTS
+            or len(params_per_ag) != sc_fitting.N_AGENTS
+            or len(idxs_per_ag) != sc_fitting.N_AGENTS):
+            raise ValueError(f'Per-agent model/params/idx tuples must have length {sc_fitting.N_AGENTS}.')
+        resolved = [_resolve_single_agent_model_and_params(
+                        models_per_ag[i], params_per_ag[i], idxs_per_ag[i])
+                    for i in range(sc_fitting.N_AGENTS)]
+        model_name = tuple(r[0] for r in resolved)
+        params_dict = tuple(r[1] for r in resolved)
     # define SCPaperScenario object
     # - calculate initial times to conflict area from distances and speeds
     #   (assuming non-zero speeds for now)
@@ -146,9 +181,10 @@ def run_simulation(model, initial_cp_distances, initial_speeds, end_time,
                                           ped_initial_speed=initial_speeds[sc_fitting.i_PED_AGENT],
                                           veh_initial_speed=initial_speeds[sc_fitting.i_VEH_AGENT],
                                           time_step=time_step,
-                                          end_time=end_time)
+                                          end_time=end_time,
+                                          veh_ehmi_time=veh_ehmi_time)
     # run simulation
-    sc_simulation = sc_fitting.construct_model_and_simulate_scenario(model_name, params_dict, scenario)
+    sc_simulation = sc_fitting.construct_model_and_simulate_scenario(model_name, params_dict, scenario, noise_seeds=noise_seeds)
     return sc_simulation
 
 

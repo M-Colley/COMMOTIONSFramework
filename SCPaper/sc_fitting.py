@@ -122,6 +122,10 @@ DEFAULT_PARAMS.DeltaT = 0.5
 DEFAULT_PARAMS.V_0_rel = 4 
 DEFAULT_PARAMS.ctrl_deltas = np.array([-1, -0.5, 0, 0.5, 1]) 
 #DEFAULT_PARAMS.ctrl_deltas = np.array([-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1]) 
+# - explicit communication (eHMI) parameters, only used by oEC models (see
+#   sc_scenario.DEFAULT_PARAMS for documentation)
+DEFAULT_PARAMS.beta_E = sc_scenario.DEFAULT_PARAMS.beta_E
+DEFAULT_PARAMS.T_E = sc_scenario.DEFAULT_PARAMS.T_E
 
 
 @dataclass
@@ -241,7 +245,7 @@ class SCPaperScenario:
                  veh_yielding_margin=COLLISION_MARGIN,
                  inhibit_first_pass_before_time=None,
                  time_step=DET_SIM_TIME_STEP, end_time=DET_SIM_END_TIME,
-                 stop_criteria = (), metric_names = None):
+                 stop_criteria = (), metric_names = None, veh_ehmi_time=None):
         """ Construct a scenario. 
             
             initial_ttcas should be a tuple defining the initial times to
@@ -250,6 +254,11 @@ class SCPaperScenario:
             for the pedestrian if ped_start_standing=True. For one of the agents,
             instead of a numerical value, a tuple of numerical values can be
             provided; if so these define different variations to the scenario.  
+            
+            veh_ehmi_time: if not None, the vehicle displays an explicit 
+            communication (eHMI) 'yield' cue from this time (s) until the end 
+            of the simulation, which affects pedestrian models with the oEC 
+            assumption (see sc_scenario.SCAgent). Default is None (no eHMI).
             
         """
         # store scenario info
@@ -266,6 +275,13 @@ class SCPaperScenario:
         self.time_step = time_step
         self.end_time = end_time
         self.stop_criteria = stop_criteria
+        # any explicit communication from the vehicle?
+        self.veh_ehmi_time = veh_ehmi_time
+        ehmi_signals = [None, None]
+        if veh_ehmi_time is not None:
+            ehmi_signals[i_VEH_AGENT] = (veh_ehmi_time, 
+                                         sc_scenario.EHMI_CUE_YIELD)
+        self.ehmi_signals = tuple(ehmi_signals)
         # figure out if there are any kinematic variations to consider
         self.initial_ttcas = initial_ttcas
         self.n_variations = 1
@@ -393,16 +409,31 @@ HIKER_YIELD_END_DIST = 2.5 # m from front bumper to conflict point
 HIKER_SIM_TIME_AFTER_VEH_STOP = 3 # if ped not moving 3 s after the car has yielded to a stop, terminate simulation
 HIKER_CIT_METRIC_NAME = 'hiker_cit'
 
-def get_hiker_scen_name(veh_speed_mph, veh_time_gap, veh_yielding):
+def get_hiker_scen_name(veh_speed_mph, veh_time_gap, veh_yielding, 
+                        veh_ehmi=False):
+    """ Return the name of a HIKER scenario, e.g., '25_2', '25_2_y', or (for 
+        a yielding vehicle displaying an eHMI) '25_2_y_e'.
+    """
     base = str(veh_speed_mph) + '_' + str(veh_time_gap)
     if veh_yielding:
-        return base + '_y'
+        name = base + '_y'
     else:
-        return base
+        name = base
+    if veh_ehmi:
+        name += '_e'
+    return name
     
 class HIKERScenario(SCPaperScenario):
     
-    def __init__(self, name, veh_speed_mph, veh_time_gap, veh_yielding):
+    def __init__(self, name, veh_speed_mph, veh_time_gap, veh_yielding, 
+                 veh_ehmi=False):
+        """ Construct a HIKER scenario. If veh_ehmi is True, the (yielding)
+            vehicle displays an eHMI 'yield' cue from the start of yielding 
+            (only supported with veh_yielding=True).
+        """
+        if veh_ehmi and not veh_yielding:
+            raise ValueError('An eHMI (veh_ehmi=True) is only supported for'
+                             ' yielding vehicles in the HIKER scenarios.')
         half_ped_width = AGENT_WIDTHS[i_PED_AGENT] / 2
         veh_speed = veh_speed_mph * 1.609 / 3.6
         # get initial time for the second vehicle to conflict area 
@@ -433,6 +464,10 @@ class HIKERScenario(SCPaperScenario):
             veh_yielding_start_time = None
             veh_yielding_margin = None
             end_time = veh_initial_ttca + 0.5 # just to definitely not end before the vehicle enters the conflict space
+        if veh_ehmi:
+            veh_ehmi_time = veh_yielding_start_time
+        else:
+            veh_ehmi_time = None
         super().__init__(
             name, initial_ttcas=(math.nan, veh_initial_ttca), ped_prio=False,
             ped_start_standing=True, ped_standing_margin=COLLISION_MARGIN,
@@ -443,7 +478,8 @@ class HIKERScenario(SCPaperScenario):
             inhibit_first_pass_before_time=HIKER_FIRST_VEH_PASSING_TIME,
             time_step=PROB_SIM_TIME_STEP, end_time=end_time,
             stop_criteria = (sc_scenario.SimStopCriterion.AGENT_IN_CS,), 
-            metric_names = (HIKER_CIT_METRIC_NAME,))
+            metric_names = (HIKER_CIT_METRIC_NAME,),
+            veh_ehmi_time=veh_ehmi_time)
 
 HIKER_SCENARIOS = {}
 for veh_speed_mph in HIKER_VEH_SPEEDS_MPH:
@@ -452,6 +488,17 @@ for veh_speed_mph in HIKER_VEH_SPEEDS_MPH:
             name = get_hiker_scen_name(veh_speed_mph, veh_time_gap, veh_yielding)
             HIKER_SCENARIOS[name] = HIKERScenario(name, veh_speed_mph, 
                                                   veh_time_gap, veh_yielding)
+# - HIKER scenarios where the yielding vehicle displays an eHMI (kept separate
+#   from HIKER_SCENARIOS, to leave the original analyses unaffected)
+HIKER_EHMI_SCENARIOS = {}
+for veh_speed_mph in HIKER_VEH_SPEEDS_MPH:
+    for veh_time_gap in HIKER_VEH_TIME_GAPS:
+        name = get_hiker_scen_name(veh_speed_mph, veh_time_gap, 
+                                   veh_yielding=True, veh_ehmi=True)
+        HIKER_EHMI_SCENARIOS[name] = HIKERScenario(name, veh_speed_mph, 
+                                                   veh_time_gap, 
+                                                   veh_yielding=True,
+                                                   veh_ehmi=True)
 
 
 # implementations of metrics for analysing model simulation results
@@ -586,6 +633,12 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
                       i_variation=None, snapshots=(None, None), 
                       detailed_snapshots=False, noise_seeds=(None, None), 
                       zero_acc_after_exit=True, apply_stop_criteria=True):
+    """ Simulate a scenario. optional_assumptions, params and params_k can 
+        each be either a single object used for both agents or a 2-tuple with
+        one object per agent (pedestrian, vehicle), as described for
+        sc_scenario.SCSimulation. Note that the params object(s) will be
+        modified in place to reflect the scenario's priority rules (V_ny_rel).
+    """
     # prepare the simulation
     # - get initial distances and constant accelerations for this scenario variation
     if scenario.n_variations > 1 and i_variation == None:
@@ -594,15 +647,27 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
     # - initial position
     initial_pos = np.array([[0, -initial_cp_dists[i_PED_AGENT]],
                            [initial_cp_dists[i_VEH_AGENT], 0]])
+    # - get per-agent views of the assumptions and parameters (but pass on
+    #   the inputs as provided to SCSimulation)
+    agent_assumptions = sc_scenario.get_per_agent_values(
+        optional_assumptions, 'optional_assumptions', dict, allow_none=False)
+    agent_params = sc_scenario.get_per_agent_values(params, 'params', object,
+                                                    allow_none=False)
     # - pedestrian priority?
-    if scenario.ped_prio:
-        params.V_ny_rel = V_NY_REL
-    else:
-        params.V_ny_rel = 0
+    for agent_params_obj in agent_params:
+        if scenario.ped_prio:
+            agent_params_obj.V_ny_rel = V_NY_REL
+        else:
+            agent_params_obj.V_ny_rel = 0
     # - Kalman priors needed?
-    if optional_assumptions[OptionalAssumption.oPF]:
+    agent_oPF = [assumptions[OptionalAssumption.oPF] 
+                 for assumptions in agent_assumptions]
+    if any(agent_oPF):
         kalman_priors = []
         for i_agent in range(N_AGENTS):
+            if not agent_oPF[i_agent]:
+                kalman_priors.append(None)
+                continue
             i_oth = 1 - i_agent
             oth_init_dist = initial_cp_dists[i_oth]
             oth_free_speed = AGENT_FREE_SPEEDS[i_oth]
@@ -618,6 +683,9 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
         stop_criteria = scenario.stop_criteria
     else:
         stop_criteria = ()
+    # - explicit communication? (getattr() for scenario objects from before 
+    #   eHMI support)
+    ehmi_signals = getattr(scenario, 'ehmi_signals', (None, None))
     
     # - set up the SCSimulation object
     sc_simulation = sc_scenario.SCSimulation(
@@ -632,7 +700,7 @@ def simulate_scenario(scenario, optional_assumptions, params, params_k,
         inhibit_first_pass_before_time=scenario.inhibit_first_pass_before_time,
         noise_seeds=noise_seeds, agent_names=AGENT_NAMES, 
         snapshot_times=snapshots, detailed_snapshots=detailed_snapshots,
-        stop_criteria=stop_criteria)
+        stop_criteria=stop_criteria, ehmi_signals=ehmi_signals)
     
     # run the simulation
     sc_simulation.run()
@@ -725,11 +793,39 @@ def construct_model_and_simulate_scenario(
     """ Convenience wrapper for simulate_scenario(), which first builds the model
         and parameterisation from model_name, the sc_fitting default parameters,
         and params_dict.
+        
+        To simulate agents with different model assumptions and/or 
+        parameters, model_name can be a 2-tuple of model strings, and/or 
+        params_dict can be a 2-tuple of parameter dicts, in both cases with
+        one element per agent (pedestrian, vehicle). A single model string 
+        or parameter dict is used for both agents.
     """
-    assumptions = sc_scenario.get_assumptions_dict_from_string(model_name)
-    params = copy.deepcopy(DEFAULT_PARAMS)
-    params_k = copy.deepcopy(get_default_params_k(model_name))
-    set_params(params, params_k, params_dict)
+    if (isinstance(model_name, str) and isinstance(params_dict, dict)):
+        # same model and parameters for both agents
+        assumptions = sc_scenario.get_assumptions_dict_from_string(model_name)
+        params = copy.deepcopy(DEFAULT_PARAMS)
+        params_k = copy.deepcopy(get_default_params_k(model_name))
+        set_params(params, params_k, params_dict)
+    else:
+        # per-agent models and/or parameters
+        agent_model_names = sc_scenario.get_per_agent_values(
+            model_name, 'model_name', str, allow_none=False)
+        agent_params_dicts = sc_scenario.get_per_agent_values(
+            params_dict, 'params_dict', dict, allow_none=False)
+        assumptions = []
+        params = []
+        params_k = []
+        for i_agent in range(N_AGENTS):
+            assumptions.append(sc_scenario.get_assumptions_dict_from_string(
+                agent_model_names[i_agent]))
+            params.append(copy.deepcopy(DEFAULT_PARAMS))
+            params_k.append(copy.deepcopy(get_default_params_k(
+                agent_model_names[i_agent])))
+            set_params(params[i_agent], params_k[i_agent], 
+                       agent_params_dicts[i_agent])
+        assumptions = tuple(assumptions)
+        params = tuple(params)
+        params_k = tuple(params_k)
     tic = time.perf_counter()
     return simulate_scenario(scenario, assumptions, params, params_k,
                              i_variation=i_variation, snapshots=snapshots, 
@@ -856,8 +952,8 @@ class SCPaperParameterSearch(parameter_search.ParameterSearch):
                                          zero_acc_after_exit=zero_acc_after_exit,
                                          apply_stop_criteria=apply_stop_criteria)
     
-    def get_metrics_for_params(self, params_dict, i_parameterisation, 
-                               i_repetition):
+    def get_metrics_for_params(self, params_dict, i_parameterisation=0, 
+                               i_repetition=0):
         
         self.verbosity_push()
         if self.n_repetitions > 1:
@@ -1043,6 +1139,10 @@ class SCPaperParameterSearch(parameter_search.ParameterSearch):
             consider_adding_free_param('T_O1')
             consider_adding_free_param('T_Of')
             consider_adding_free_param('sigma_O')
+        # explicit communication (eHMI)
+        if optional_assumptions[OptionalAssumption.oEC]:
+            consider_adding_free_param('beta_E')
+            consider_adding_free_param('T_E')
         # noisy perception
         if (optional_assumptions[OptionalAssumption.oSNv] 
             or optional_assumptions[OptionalAssumption.oSNc]):
